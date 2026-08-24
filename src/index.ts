@@ -50,6 +50,7 @@ function render(findings: Finding[]) {
       f.anonCanRead ? red('anon-read') : null,
       f.crossTenantRead ? red('cross-read') : null,
       f.crossTenantWrite ? red('cross-write') : null,
+      f.crossTenantDelete ? red('cross-delete') : null,
     ]
       .filter(Boolean)
       .join(' ');

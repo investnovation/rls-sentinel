@@ -19,6 +19,8 @@ import type { PoolClient } from 'pg';
 export const TENANT_A = '00000000-0000-4000-8000-0000000000aa';
 export const TENANT_B = '00000000-0000-4000-8000-0000000000bb';
 
+const DELETE_PROBE_MAX_ROWS = 10_000;
+
 const OWNER_COLUMN_CANDIDATES = [
   'user_id', 'owner_id', 'tenant_id', 'profile_id',
   'account_id', 'created_by', 'author_id', 'organization_id', 'org_id',
@@ -34,6 +36,7 @@ export interface Finding {
   anonCanRead: boolean;
   crossTenantRead: boolean;
   crossTenantWrite: boolean;
+  crossTenantDelete: boolean;
   severity: Severity;
   detail: string;
 }
@@ -46,12 +49,14 @@ interface TableInfo {
   columns: string[];
   pkColumns: string[];
   nullableColumns: string[];
+  estRows: number;
 }
 
 export async function listTables(c: PoolClient, schema: string): Promise<TableInfo[]> {
   const { rows } = await c.query(
     `select c.relname                    as table,
             c.relrowsecurity             as rls_enabled,
+            c.reltuples::bigint          as est_rows,
             count(distinct p.polname)    as policy_count,
             array_agg(distinct a.attname)::text[] as columns,
             array_remove(array_agg(distinct case when i.indisprimary then a.attname end), null)::text[] as pk_columns,
@@ -63,7 +68,7 @@ export async function listTables(c: PoolClient, schema: string): Promise<TableIn
        left join pg_index i on i.indrelid = c.oid and i.indisprimary and a.attnum = any(i.indkey)
       where n.nspname = $1
         and c.relkind in ('r','p')
-      group by c.relname, c.relrowsecurity
+      group by c.relname, c.relrowsecurity, c.reltuples
       order by c.relname`,
     [schema],
   );
@@ -75,6 +80,7 @@ export async function listTables(c: PoolClient, schema: string): Promise<TableIn
     columns: r.columns as string[],
     pkColumns: r.pk_columns as string[],
     nullableColumns: r.nullable_columns as string[],
+    estRows: Number(r.est_rows),
   }));
 }
 
@@ -157,6 +163,7 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
     anonCanRead: false,
     crossTenantRead: false,
     crossTenantWrite: false,
+    crossTenantDelete: false,
     severity: 'ok',
     detail: '',
   };
@@ -262,6 +269,42 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
         after.rows.length > 0 &&
         before.rows[0].x !== after.rows[0].x;
     }
+
+    // --- Probe 4: can tenant A DELETE tenant B's rows? ---
+    //
+    // Same blind/targeted split as the write probe. `delete from t where
+    // owner = B` reads the owner column, so the SELECT policy hides the row and
+    // nothing is deleted. `delete from t` -- no WHERE at all -- reads nothing,
+    // so only the DELETE policy applies. A `using (true)` DELETE policy means
+    // any authenticated user can empty the table.
+    //
+    // Bounded deliberately: a blind DELETE on a large table is expensive even
+    // when rolled back, so we skip it above a threshold rather than lock up
+    // someone's database to prove a point.
+    if (t.estRows <= DELETE_PROBE_MAX_ROWS) {
+      await c.query('savepoint del');
+      const beforeDel = await c.query(
+        `select count(*)::int as n from ${qualified} where "${ownerColumn}" = $1`,
+        [TENANT_B],
+      );
+
+      await becomeUser(c, 'authenticated', TENANT_A);
+      try {
+        await c.query(`delete from ${qualified}`);
+      } catch {
+        // Denied is the correct outcome.
+      }
+      await resetRole(c);
+
+      const afterDel = await c.query(
+        `select count(*)::int as n from ${qualified} where "${ownerColumn}" = $1`,
+        [TENANT_B],
+      );
+      base.crossTenantDelete =
+        beforeDel.rows[0].n > 0 && afterDel.rows[0].n === 0;
+
+      await c.query('rollback to savepoint del');
+    }
   } finally {
     await c.query('rollback to savepoint probe');
     await resetRole(c);
@@ -269,7 +312,10 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
 
   // Severity. Write leaks outrank read leaks: an attacker who can write can
   // usually escalate to read anyway, and can also destroy data.
-  if (base.crossTenantWrite) {
+  if (base.crossTenantDelete) {
+    base.severity = 'critical';
+    base.detail = 'Tenant A DELETED tenant B rows. Any user can empty this table.';
+  } else if (base.crossTenantWrite) {
     base.severity = 'critical';
     base.detail = 'Tenant A MODIFIED tenant B rows. Write isolation is broken.';
   } else if (base.anonCanRead) {

@@ -13,15 +13,17 @@ the other one's data — reads and writes both. Then it rolls everything back.
   RLS Sentinel — cross-tenant isolation proof
   7 tables in schema "public"
 
-  LEAK   public.audit_log      anon-read cross-read cross-write
-         Tenant A MODIFIED tenant B rows. Write isolation is broken.
+  LEAK   public.audit_log      anon-read cross-read cross-write cross-delete
+         Tenant A DELETED tenant B rows. Any user can empty this table.
   LEAK   public.invoices       cross-write
          Tenant A MODIFIED tenant B rows. Write isolation is broken.
   LEAK   public.notes          anon-read cross-read
          Unauthenticated caller read rows. The anon key ships in your client bundle.
+  LEAK   public.receipts       cross-delete
+         Tenant A DELETED tenant B rows. Any user can empty this table.
    OK    public.documents
 
-  3 table(s) leaked across tenants.
+  4 table(s) leaked across tenants.
   These were proven with real seeded rows, not inferred from policy text.
 ```
 
@@ -35,7 +37,7 @@ Every scanner that reads policy metadata calls that table safe.
 It isn't. Its `UPDATE` policy is `using (true)`, and any authenticated user can
 silently modify every other tenant's invoices.
 
-## Why write leaks get missed
+## Why write and delete leaks get missed
 
 The obvious way to test a write is to target one:
 
@@ -60,6 +62,16 @@ row in the table belongs to the attacker.
 RLS Sentinel issues the blind write and detects which rows were actually
 touched via `ctid`, the physical row version. That works regardless of column
 type, and unlike `xmin` it stays valid inside a single transaction.
+
+`DELETE` has the identical flaw and a worse consequence. `delete from t where
+owner_id = '<other-tenant>'` is blocked by a correct `SELECT` policy. `delete
+from t` is not — and a `DELETE` policy of `using (true)` means any authenticated
+user can empty the table. `public.receipts` above is exactly that: reads
+perfectly scoped, deletes wide open.
+
+The delete probe is skipped on tables above 10,000 estimated rows. A blind
+`DELETE` is expensive even when rolled back, and locking up a large table to
+prove a point is not a trade worth making.
 
 ## Usage
 
@@ -121,9 +133,10 @@ Point it at a branch or staging database.
 
 ## Status
 
-v0.1.0. Detects three leak classes: unauthenticated read via the anon key,
-cross-tenant read, cross-tenant blind write.
+v0.3.0. Detects four leak classes: unauthenticated read via the anon key,
+cross-tenant read, cross-tenant blind write, and cross-tenant blind delete.
 
 Not yet covered: `SECURITY DEFINER` functions that bypass RLS, storage bucket
-policies, `DELETE` probes, composite ownership, and tables whose ownership is
-resolved through a join rather than a column.
+policies, `INSERT` probes (forging rows owned by another tenant), composite
+ownership, and tables whose ownership resolves through a join rather than a
+column.
