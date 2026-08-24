@@ -1,0 +1,107 @@
+#!/usr/bin/env node
+import { Pool } from 'pg';
+import { listTables, proveTable, type Finding } from './prove.js';
+
+const args = process.argv.slice(2);
+const flag = (name: string, fallback?: string) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
+};
+
+const connectionString = flag('db', process.env.DATABASE_URL);
+const schema = flag('schema', 'public')!;
+const asJson = args.includes('--json');
+
+if (!connectionString) {
+  console.error('rls-sentinel: pass --db <connection-string> or set DATABASE_URL');
+  process.exit(2);
+}
+
+const COLOR = process.stdout.isTTY && !asJson;
+
+// Hosted Postgres (Supabase, Neon, RDS) requires TLS; a local unix socket or
+// localhost does not. Detect rather than making the user think about it.
+const isLocal = /localhost|127\.0\.0\.1|host=\/|\.sock/.test(connectionString);
+const insecure = args.includes('--insecure');
+const ssl = isLocal ? undefined : { rejectUnauthorized: !insecure };
+
+const c = (code: string, s: string) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
+const red = (s: string) => c('31', s);
+const yellow = (s: string) => c('33', s);
+const green = (s: string) => c('32', s);
+const dim = (s: string) => c('2', s);
+const bold = (s: string) => c('1', s);
+
+function render(findings: Finding[]) {
+  const leaks = findings.filter((f) => f.severity === 'critical');
+  const warns = findings.filter((f) => f.severity === 'high');
+  const skipped = findings.filter((f) => f.severity === 'skipped');
+  const ok = findings.filter((f) => f.severity === 'ok');
+
+  console.log('');
+  console.log(bold('  RLS Sentinel — cross-tenant isolation proof'));
+  console.log(dim(`  ${findings.length} tables in schema "${schema}"`));
+  console.log('');
+
+  const marks = (f: Finding) =>
+    [
+      f.anonCanRead ? red('anon-read') : null,
+      f.crossTenantRead ? red('cross-read') : null,
+      f.crossTenantWrite ? red('cross-write') : null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+  for (const f of [...leaks, ...warns, ...ok, ...skipped]) {
+    const badge =
+      f.severity === 'critical' ? red('  LEAK  ')
+      : f.severity === 'high'   ? yellow('  WARN  ')
+      : f.severity === 'skipped' ? dim('  SKIP  ')
+      :                            green('   OK   ');
+    console.log(`${badge} ${f.table.padEnd(28)} ${marks(f)}`);
+    if (f.severity !== 'ok') console.log(dim(`         ${f.detail}`));
+  }
+
+  console.log('');
+  if (leaks.length) {
+    console.log(red(bold(`  ${leaks.length} table(s) leaked across tenants.`)));
+    console.log(dim('  These were proven with real seeded rows, not inferred from policy text.'));
+  } else {
+    console.log(green(bold('  No cross-tenant leaks found.')));
+  }
+  if (skipped.length) {
+    console.log(dim(`  ${skipped.length} skipped (no ownership column detected).`));
+  }
+  console.log('');
+}
+
+(async () => {
+  const pool = new Pool({ connectionString, ssl });
+  const client = await pool.connect();
+  const findings: Finding[] = [];
+
+  try {
+    // One outer transaction. Nothing we do is ever committed.
+    await client.query('begin');
+    const tables = await listTables(client, schema);
+    for (const t of tables) {
+      findings.push(await proveTable(client, t));
+    }
+  } finally {
+    await client.query('rollback');
+    client.release();
+    await pool.end();
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ schema, findings }, null, 2));
+  } else {
+    render(findings);
+  }
+
+  // Non-zero exit is the entire point: this is a CI gate, not a report.
+  process.exit(findings.some((f) => f.severity === 'critical') ? 1 : 0);
+})().catch((err) => {
+  console.error('rls-sentinel: ' + err.message);
+  process.exit(2);
+});

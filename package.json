@@ -1,0 +1,15 @@
+{
+  "name": "rls-sentinel",
+  "version": "0.1.0",
+  "description": "Prove tenant A cannot read or write tenant B's rows. On every deploy.",
+  "type": "module",
+  "bin": { "rls-sentinel": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": ["supabase", "postgres", "rls", "row-level-security", "multi-tenant", "security", "ci"],
+  "license": "MIT",
+  "dependencies": { "pg": "^8.16.3" },
+  "devDependencies": { "@types/pg": "^8.11.10", "tsx": "^4.19.2", "typescript": "^5.7.2" }
+}
