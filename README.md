@@ -68,7 +68,7 @@ npx rls-sentinel --db "$DATABASE_URL"
 npx rls-sentinel --db "$DATABASE_URL" --schema public --json
 ```
 
-Exit codes: `0` clean, `1` leaks found, `2` error. The non-zero exit is the
+Exit codes: `0` clean, `1` leaks found, `2` error, `3` refused (see Safety). The non-zero exit is the
 entire point — this is a CI gate, not a report you read once.
 
 ```yaml
@@ -83,7 +83,41 @@ savepoint per table. Nothing is committed. No row is left behind. Tables that
 can't be seeded (NOT NULL columns without defaults, FK constraints) are reported
 as `SKIP` with the reason — never silently passed.
 
-Point it at staging, not production, until you trust it.
+### The production guard
+
+Rollback covers the data. It does not cover everything, so the tool refuses to
+run against a database that looks live:
+
+```
+  Refusing to run: this looks like a live database.
+    - auth.users contains 40 accounts.
+    - Tables carrying substantial data: notes (~5000).
+
+  This tool inserts rows and runs updates. It rolls all of it back,
+  but rollback does not undo everything:
+    - Sequence values are consumed permanently (5 table(s) affected).
+    - Triggers fire before rollback: invoices.
+      Anything one of them sends over the network has already left.
+    - Row locks are held for the duration of the probe.
+```
+
+Three things survive a rollback:
+
+- **Sequences are non-transactional.** Inserting into a table with a `bigserial`
+  primary key permanently consumes id values. Cosmetic alone; alarming if
+  someone is watching for gaps.
+- **Triggers fire before the rollback.** One that writes to an audit table is
+  rolled back with everything else. One that calls out over the network —
+  `pg_net`, a webhook, an email, a queue in another system — has already sent it.
+- **Row locks are held** for the duration of the probe.
+
+Detection uses the number of accounts in `auth.users`, planner row estimates, and
+the connection string. Override with `--allow-production` once you've read the
+warning.
+
+Exit `3` means refused.
+
+Point it at a branch or staging database.
 
 ## Status
 
