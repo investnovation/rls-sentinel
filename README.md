@@ -73,6 +73,31 @@ The delete probe is skipped on tables above 10,000 estimated rows. A blind
 `DELETE` is expensive even when rolled back, and locking up a large table to
 prove a point is not a trade worth making.
 
+## Ownership through a join
+
+Most real schemas have tables that own nothing themselves. A `messages` table
+has a `conversation_id` and no `user_id` — the *conversation* is what belongs to
+someone. These are usually the tables holding the content that actually matters,
+and a tool that only looks for `user_id` skips every one of them.
+
+RLS Sentinel follows the foreign key. It seeds a parent row for each tenant,
+links a child row to each, and probes through the relationship:
+
+```
+  LEAK   public.messages    cross-delete
+         conversation_id -> conversations.user_id
+```
+
+Read isolation held there — the `exists (select 1 from conversations ...)`
+policy does its job. The `DELETE` policy was `using (true)`, so any authenticated
+user could empty the table. Reads correct, deletes wide open, and nothing that
+inspects policy metadata would have caught it.
+
+Three ownership shapes are handled: a direct column, a primary key that is
+itself the user id (Supabase's profile pattern), and a foreign key to a table
+that has one. Foreign key chains are seeded to their root, so
+`memory -> profiles -> auth.users` works.
+
 ## Usage
 
 ```bash
@@ -133,10 +158,12 @@ Point it at a branch or staging database.
 
 ## Status
 
-v0.3.0. Detects four leak classes: unauthenticated read via the anon key,
-cross-tenant read, cross-tenant blind write, and cross-tenant blind delete.
+v0.4.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
+read, cross-tenant blind write, cross-tenant blind delete — across three
+ownership shapes: direct column, primary-key-as-user-id, and single-hop foreign
+key join.
 
 Not yet covered: `SECURITY DEFINER` functions that bypass RLS, storage bucket
 policies, `INSERT` probes (forging rows owned by another tenant), composite
-ownership, and tables whose ownership resolves through a join rather than a
-column.
+ownership, and multi-hop join ownership (a table two or more foreign keys away
+from anything owned).

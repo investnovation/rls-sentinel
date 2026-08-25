@@ -98,20 +98,19 @@ function pickScratchColumn(
 }
 
 /**
- * Find a single-column foreign key on the ownership column.
+ * Find a single-column foreign key on a given column.
  *
- * In almost every real Supabase schema, `user_id` references `auth.users(id)`.
- * Seeding a synthetic tenant UUID violates that constraint and the table gets
- * skipped — which would make the tool useless on exactly the projects it's for.
- * So we look the FK up and seed the parent first, inside the same transaction
- * that gets rolled back.
+ * Returns schema and table separately so the result can be fed back in and the
+ * chain walked. Real schemas nest: `memory.user_id` -> `profiles.id` ->
+ * `auth.users.id`. Seeding only the first level fails on the second.
  */
-async function findOwnerForeignKey(
-  c: PoolClient, schema: string, table: string, ownerColumn: string,
-): Promise<{ refTable: string; refColumn: string } | null> {
+async function findForeignKey(
+  c: PoolClient, schema: string, table: string, column: string,
+): Promise<{ refSchema: string; refTable: string; refColumn: string } | null> {
   const { rows } = await c.query(
-    `select quote_ident(rn.nspname) || '.' || quote_ident(rc.relname) as ref_table,
-            ra.attname                                               as ref_column
+    `select rn.nspname as ref_schema,
+            rc.relname as ref_table,
+            ra.attname as ref_column
        from pg_constraint con
        join pg_class      c1 on c1.oid = con.conrelid
        join pg_namespace  n1 on n1.oid = c1.relnamespace
@@ -124,11 +123,33 @@ async function findOwnerForeignKey(
         and a.attname = $3
         and array_length(con.conkey, 1) = 1
       limit 1`,
-    [schema, table, ownerColumn],
+    [schema, table, column],
   );
   return rows.length
-    ? { refTable: rows[0].ref_table, refColumn: rows[0].ref_column }
+    ? { refSchema: rows[0].ref_schema, refTable: rows[0].ref_table, refColumn: rows[0].ref_column }
     : null;
+}
+
+/**
+ * Seed the synthetic tenants up an entire foreign key chain, deepest first.
+ *
+ * `memory.user_id` -> `profiles.id` -> `auth.users.id` means auth.users has to
+ * be populated before profiles, and profiles before memory. Depth-limited so a
+ * self-referencing or cyclic schema can't spin forever.
+ */
+async function seedFkChain(
+  c: PoolClient, schema: string, table: string, column: string, depth = 0,
+): Promise<void> {
+  if (depth > 5) return;
+  const parent = await findForeignKey(c, schema, table, column);
+  if (parent) {
+    await seedFkChain(c, parent.refSchema, parent.refTable, parent.refColumn, depth + 1);
+    await c.query(
+      `insert into "${parent.refSchema}"."${parent.refTable}" ("${parent.refColumn}")
+         values ($1), ($2) on conflict do nothing`,
+      [TENANT_A, TENANT_B],
+    );
+  }
 }
 
 function pickOwnerColumn(columns: string[]): string | null {
@@ -151,13 +172,121 @@ async function resetRole(c: PoolClient) {
   await c.query('reset role');
 }
 
-export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> {
-  const ownerColumn = pickOwnerColumn(t.columns);
+/**
+ * How a table's rows are tied to a user.
+ *
+ *  - direct: the table carries the ownership column itself.
+ *  - join:   the table owns nothing; it belongs to a user through a parent.
+ *            `messages` has no user_id, only conversation_id, and the
+ *            conversation is what belongs to someone. Most real schemas have
+ *            tables like this, and they are usually the ones holding the
+ *            content that actually matters.
+ */
+type OwnershipPlan =
+  | { kind: 'direct'; column: string }
+  | {
+      kind: 'join'; fkColumn: string;
+      parentSchema: string; parentTable: string;
+      parentPk: string; parentOwner: string;
+    };
+
+async function resolveOwnership(
+  c: PoolClient, t: TableInfo,
+): Promise<OwnershipPlan | null> {
+  const direct = pickOwnerColumn(t.columns);
+  if (direct) return { kind: 'direct', column: direct };
+
+  // Ownership by primary key: Supabase's profile pattern, where the PK is the
+  // user id and carries an FK straight to auth.users.
+  if (t.pkColumns.length === 1) {
+    const pkFk = await findForeignKey(c, t.schema, t.table, t.pkColumns[0]);
+    if (pkFk && pkFk.refSchema === 'auth' && pkFk.refTable === 'users') {
+      return { kind: 'direct', column: t.pkColumns[0] };
+    }
+  }
+
+  // Ownership through a join: find an FK pointing at a table that does have an
+  // ownership column, and test through it.
+  for (const col of t.columns) {
+    if (t.pkColumns.includes(col)) continue;
+    const fk = await findForeignKey(c, t.schema, t.table, col);
+    if (!fk) continue;
+
+    const { rows } = await c.query(
+      `select array_agg(a.attname)::text[] as cols,
+              (select ra.attname
+                 from pg_index i
+                 join pg_attribute ra on ra.attrelid = i.indrelid
+                                     and ra.attnum = i.indkey[0]
+                where i.indrelid = c.oid and i.indisprimary
+                limit 1) as pk
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+         join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+        where n.nspname = $1 and c.relname = $2
+        group by c.oid`,
+      [fk.refSchema, fk.refTable],
+    );
+    if (!rows.length) continue;
+
+    const parentOwner = pickOwnerColumn(rows[0].cols as string[]);
+    if (parentOwner && rows[0].pk) {
+      return {
+        kind: 'join', fkColumn: col,
+        parentSchema: fk.refSchema, parentTable: fk.refTable,
+        parentPk: rows[0].pk, parentOwner,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Seed one row for each synthetic tenant and return the column/value pair that
+ * distinguishes them. For direct ownership that is the ownership column itself;
+ * for join ownership it is the foreign key, pointing at parent rows that belong
+ * to different people.
+ */
+async function seedTenants(
+  c: PoolClient, t: TableInfo, plan: OwnershipPlan,
+): Promise<{ column: string; valueB: unknown }> {
   const qualified = `"${t.schema}"."${t.table}"`;
+
+  if (plan.kind === 'direct') {
+    await seedFkChain(c, t.schema, t.table, plan.column);
+    await c.query(
+      `insert into ${qualified} ("${plan.column}") values ($1), ($2)`,
+      [TENANT_A, TENANT_B],
+    );
+    return { column: plan.column, valueB: TENANT_B };
+  }
+
+  const parentQ = `"${plan.parentSchema}"."${plan.parentTable}"`;
+  await seedFkChain(c, plan.parentSchema, plan.parentTable, plan.parentOwner);
+  const parents = await c.query(
+    `insert into ${parentQ} ("${plan.parentOwner}") values ($1), ($2)
+       returning "${plan.parentPk}" as pk`,
+    [TENANT_A, TENANT_B],
+  );
+  const [pa, pb] = parents.rows.map((r) => r.pk);
+  await c.query(
+    `insert into ${qualified} ("${plan.fkColumn}") values ($1), ($2)`,
+    [pa, pb],
+  );
+  return { column: plan.fkColumn, valueB: pb };
+}
+
+export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> {
+  const qualified = `"${t.schema}"."${t.table}"`;
+  const plan = await resolveOwnership(c, t);
 
   const base: Finding = {
     table: `${t.schema}.${t.table}`,
-    ownerColumn,
+    ownerColumn:
+      plan?.kind === 'direct' ? plan.column
+      : plan?.kind === 'join' ? `${plan.fkColumn} -> ${plan.parentTable}.${plan.parentOwner}`
+      : null,
     rlsEnabled: t.rlsEnabled,
     policyCount: t.policyCount,
     anonCanRead: false,
@@ -168,141 +297,78 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
     detail: '',
   };
 
-  if (!ownerColumn) {
+  if (!plan) {
     return {
-      ...base,
-      severity: 'skipped',
-      detail: 'No ownership column found. Pass --owner-column to test this table.',
+      ...base, severity: 'skipped',
+      detail: 'No ownership found, directly or through a foreign key.',
     };
   }
 
-  // Everything below happens inside a savepoint we always roll back.
   await c.query('savepoint probe');
+  let disc: { column: string; valueB: unknown };
   try {
-    // Seed as the table owner, which bypasses RLS by design.
-    // Real schemas are messy: NOT NULL columns without defaults, FK constraints,
-    // check constraints. If we can't seed a table we skip it loudly rather than
-    // aborting the run or, worse, reporting a clean bill we didn't earn.
-    try {
-      // If the ownership column points at another table (usually auth.users),
-      // the parent rows have to exist before ours can. Rolled back with
-      // everything else.
-      const fk = await findOwnerForeignKey(c, t.schema, t.table, ownerColumn);
-      if (fk) {
-        await c.query(
-          `insert into ${fk.refTable} ("${fk.refColumn}") values ($1), ($2)
-             on conflict do nothing`,
-          [TENANT_A, TENANT_B],
-        );
-      }
+    disc = await seedTenants(c, t, plan);
+  } catch (err: any) {
+    await c.query('rollback to savepoint probe');
+    return {
+      ...base, severity: 'skipped',
+      detail: `Could not seed test rows: ${err.message.split('\n')[0]}`,
+    };
+  }
 
-      await c.query(
-        `insert into ${qualified} ("${ownerColumn}") values ($1), ($2)`,
-        [TENANT_A, TENANT_B],
-      );
-    } catch (err: any) {
-      await c.query('rollback to savepoint probe');
-      return {
-        ...base,
-        severity: 'skipped',
-        detail: `Could not seed test rows: ${err.message.split('\n')[0]}`,
-      };
-    }
-
-    // --- Probe 1: what can an unauthenticated caller see? ---
-    // This is the anon-key exposure class: the key ships in the client bundle.
+  try {
+    // Probe 1: what can an unauthenticated caller see?
     await becomeUser(c, 'anon', null);
     const anonRead = await c.query(`select count(*)::int as n from ${qualified}`);
     base.anonCanRead = anonRead.rows[0].n > 0;
     await resetRole(c);
 
-    // --- Probe 2: can tenant A read tenant B's rows? ---
+    // Probe 2: can tenant A read tenant B's rows?
     await becomeUser(c, 'authenticated', TENANT_A);
     const crossRead = await c.query(
-      `select count(*)::int as n from ${qualified} where "${ownerColumn}" = $1`,
-      [TENANT_B],
+      `select count(*)::int as n from ${qualified} where "${disc.column}" = $1`,
+      [disc.valueB],
     );
     base.crossTenantRead = crossRead.rows[0].n > 0;
-
     await resetRole(c);
 
-    // --- Probe 3: can tenant A WRITE to tenant B's rows? ---
-    //
-    // This has to be a BLIND write, and the distinction is the whole reason
-    // this tool exists.
-    //
-    // A targeted write -- `update t set x = x where owner = B` -- reads the
-    // owner column in its WHERE clause, which makes Postgres apply the SELECT
-    // policy too. A correct SELECT policy hides B's row, the update matches
-    // nothing, and the table looks safe. It is not safe. It was never tested.
-    //
-    // A blind write -- `update t set <scratch> = null`, no WHERE, constant
-    // value -- reads no columns at all. Only the UPDATE policy applies. If that
-    // policy is `using (true)`, every row in the table is modified, including
-    // every other tenant's.
-    //
-    // We detect what was actually touched with ctid, the physical row version.
-    // (xmin would not work here: it is the transaction id, and the whole probe
-    // runs inside one transaction, so it never changes.) An UPDATE always
-    // writes a new tuple version at a new ctid, whatever the column types are.
-    const scratch = pickScratchColumn(t.nullableColumns, ownerColumn, t.pkColumns);
+    // Probe 3: blind write. See the note in the README -- a targeted write is
+    // masked by a correct SELECT policy, so only a blind one tests the UPDATE
+    // policy in isolation. ctid detects which rows were really touched.
+    const scratch = pickScratchColumn(t.nullableColumns, disc.column, t.pkColumns);
     if (scratch) {
       const before = await c.query(
-        `select ctid::text as x from ${qualified} where "${ownerColumn}" = $1`,
-        [TENANT_B],
+        `select ctid::text as x from ${qualified} where "${disc.column}" = $1`,
+        [disc.valueB],
       );
-
       await becomeUser(c, 'authenticated', TENANT_A);
-      try {
-        await c.query(`update ${qualified} set "${scratch}" = null`);
-      } catch {
-        // Denied, or the column rejects null. Either way, no leak proven here.
-      }
+      try { await c.query(`update ${qualified} set "${scratch}" = null`); } catch { /* denied */ }
       await resetRole(c);
-
       const after = await c.query(
-        `select ctid::text as x from ${qualified} where "${ownerColumn}" = $1`,
-        [TENANT_B],
+        `select ctid::text as x from ${qualified} where "${disc.column}" = $1`,
+        [disc.valueB],
       );
       base.crossTenantWrite =
-        before.rows.length > 0 &&
-        after.rows.length > 0 &&
+        before.rows.length > 0 && after.rows.length > 0 &&
         before.rows[0].x !== after.rows[0].x;
     }
 
-    // --- Probe 4: can tenant A DELETE tenant B's rows? ---
-    //
-    // Same blind/targeted split as the write probe. `delete from t where
-    // owner = B` reads the owner column, so the SELECT policy hides the row and
-    // nothing is deleted. `delete from t` -- no WHERE at all -- reads nothing,
-    // so only the DELETE policy applies. A `using (true)` DELETE policy means
-    // any authenticated user can empty the table.
-    //
-    // Bounded deliberately: a blind DELETE on a large table is expensive even
-    // when rolled back, so we skip it above a threshold rather than lock up
-    // someone's database to prove a point.
+    // Probe 4: blind delete. Same shape, worse consequence. Bounded by row
+    // count so we never lock up a large table to make a point.
     if (t.estRows <= DELETE_PROBE_MAX_ROWS) {
       await c.query('savepoint del');
       const beforeDel = await c.query(
-        `select count(*)::int as n from ${qualified} where "${ownerColumn}" = $1`,
-        [TENANT_B],
+        `select count(*)::int as n from ${qualified} where "${disc.column}" = $1`,
+        [disc.valueB],
       );
-
       await becomeUser(c, 'authenticated', TENANT_A);
-      try {
-        await c.query(`delete from ${qualified}`);
-      } catch {
-        // Denied is the correct outcome.
-      }
+      try { await c.query(`delete from ${qualified}`); } catch { /* denied */ }
       await resetRole(c);
-
       const afterDel = await c.query(
-        `select count(*)::int as n from ${qualified} where "${ownerColumn}" = $1`,
-        [TENANT_B],
+        `select count(*)::int as n from ${qualified} where "${disc.column}" = $1`,
+        [disc.valueB],
       );
-      base.crossTenantDelete =
-        beforeDel.rows[0].n > 0 && afterDel.rows[0].n === 0;
-
+      base.crossTenantDelete = beforeDel.rows[0].n > 0 && afterDel.rows[0].n === 0;
       await c.query('rollback to savepoint del');
     }
   } finally {
@@ -310,8 +376,6 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
     await resetRole(c);
   }
 
-  // Severity. Write leaks outrank read leaks: an attacker who can write can
-  // usually escalate to read anyway, and can also destroy data.
   if (base.crossTenantDelete) {
     base.severity = 'critical';
     base.detail = 'Tenant A DELETED tenant B rows. Any user can empty this table.';
@@ -329,7 +393,7 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
     base.detail = 'RLS on with zero policies: locked to everyone, including your app.';
   } else {
     base.severity = 'ok';
-    base.detail = 'Isolation held under read and write probes.';
+    base.detail = 'Isolation held under read, write and delete probes.';
   }
 
   return base;
