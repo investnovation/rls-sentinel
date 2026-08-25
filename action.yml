@@ -1,0 +1,43 @@
+name: 'RLS Sentinel'
+description: 'Prove tenant A cannot read or write tenant B rows, on every deploy.'
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  database-url:
+    description: 'Postgres connection string. Use a branch or staging database.'
+    required: true
+  schema:
+    description: 'Schema to test.'
+    required: false
+    default: 'public'
+  allow-production:
+    description: 'Bypass the production guard. Read the README before setting this.'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci
+
+    - name: Prove isolation
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        FLAGS=""
+        if [ "${{ inputs.allow-production }}" = "true" ]; then
+          FLAGS="--allow-production"
+        fi
+        npx tsx src/index.ts \
+          --db "${{ inputs.database-url }}" \
+          --schema "${{ inputs.schema }}" \
+          $FLAGS

@@ -61,3 +61,13 @@ create policy post_upd on public.posts for update using (true);  -- write leak
 
 grant select, insert, update, delete on all tables in schema public to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
+
+-- 5. DELETE LEAK: reads correctly scoped, deletes wide open.
+drop table if exists public.receipts cascade;
+create table public.receipts (id bigserial primary key, owner_id uuid, amount int);
+alter table public.receipts enable row level security;
+create policy rec_sel on public.receipts for select using (owner_id = auth.uid());
+create policy rec_del on public.receipts for delete using (true);
+
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+grant usage, select on all sequences in schema public to anon, authenticated;

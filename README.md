@@ -108,10 +108,28 @@ npx rls-sentinel --db "$DATABASE_URL" --schema public --json
 Exit codes: `0` clean, `1` leaks found, `2` error, `3` refused (see Safety). The non-zero exit is the
 entire point — this is a CI gate, not a report you read once.
 
+### As a GitHub Action
+
+This is the point of the tool. A one-time scan tells you the isolation held
+when you ran it. A CI gate tells you it still holds after the pull request that
+added a table on Thursday.
+
 ```yaml
 # .github/workflows/rls.yml
-- run: npx rls-sentinel --db ${{ secrets.SUPABASE_DB_URL }}
+name: rls
+on: [pull_request]
+
+jobs:
+  isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: investnovation/rls-sentinel@main
+        with:
+          database-url: ${{ secrets.SUPABASE_BRANCH_DB_URL }}
 ```
+
+Point it at a preview branch or staging database. The production guard will
+refuse a live one, which is the intended behaviour in CI.
 
 ## Safety
 
@@ -155,6 +173,22 @@ warning.
 Exit `3` means refused.
 
 Point it at a branch or staging database.
+
+## Testing itself
+
+A tool that proves other people's isolation should prove its own.
+
+```bash
+DATABASE_URL=postgresql://... node ./test/selftest.mjs
+```
+
+It loads both fixtures into a real Postgres, runs the CLI, and asserts every
+expected finding — including the negative ones. A false positive on a correctly
+secured table is worse than a miss, because it ships noise into someone's CI and
+teaches them to ignore the gate. Those assertions are the ones that matter.
+
+Runs on every push against Postgres 16. `real-fixture.sql` is modelled on an
+actual production schema rather than an invented one.
 
 ## Status
 
