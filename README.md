@@ -174,6 +174,38 @@ Exit `3` means refused.
 
 Point it at a branch or staging database.
 
+## Column privileges (advisory)
+
+RLS answers *which rows*. Column grants answer *which columns of those rows*.
+They are different axes, and a correct policy does nothing about the second.
+
+A table with `using (user_id = auth.uid())` **and** `with check (user_id =
+auth.uid())` is perfectly isolated — and a user can still rewrite every column
+of a row that genuinely is theirs, including their balance, their plan, their
+role, or their item count. `WITH CHECK` doesn't help: changing `count` never
+violates `user_id = auth.uid()`.
+
+```
+update inventory set count = 999999 where user_id = auth.uid();
+-- UPDATE 1. Policy satisfied. Count is now 999999.
+```
+
+The fix is column-level grants:
+
+```sql
+revoke update on public.inventory from authenticated;
+grant  update (item_id) on public.inventory to authenticated;
+-- ERROR: permission denied for table inventory
+```
+
+This is reported as an **advisory** and never changes the exit code. Supabase
+grants table-wide privileges to `authenticated` by default, so failing CI on it
+would fail on essentially every project on day one — and a gate that always
+fails gets switched off. The tool *proves* leaks; this *observes* a risk. Those
+belong in separate lists.
+
+Credit: raised by u/guidondor on r/Supabase.
+
 ## Testing itself
 
 A tool that proves other people's isolation should prove its own.

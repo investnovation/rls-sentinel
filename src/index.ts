@@ -2,6 +2,7 @@
 import { Pool } from 'pg';
 import { listTables, proveTable, type Finding } from './prove.js';
 import { assessSafety } from './safety.js';
+import { checkColumnGrants, type GrantAdvisory } from './grants.js';
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback?: string) => {
@@ -34,7 +35,7 @@ const green = (s: string) => c('32', s);
 const dim = (s: string) => c('2', s);
 const bold = (s: string) => c('1', s);
 
-function render(findings: Finding[]) {
+function render(findings: Finding[], grants: GrantAdvisory[]) {
   const leaks = findings.filter((f) => f.severity === 'critical');
   const warns = findings.filter((f) => f.severity === 'high');
   const skipped = findings.filter((f) => f.severity === 'skipped');
@@ -75,6 +76,23 @@ function render(findings: Finding[]) {
   if (skipped.length) {
     console.log(dim(`  ${skipped.length} skipped (no ownership column detected).`));
   }
+
+  if (grants.length) {
+    const tables = [...new Set(grants.map((g) => g.table))];
+    console.log('');
+    console.log(yellow(`  Advisory — ${tables.length} table(s) grant table-wide UPDATE:`));
+    for (const t of tables.slice(0, 8)) {
+      const who = grants.filter((g) => g.table === t).map((g) => g.grantee).join(', ');
+      const cols = grants.find((g) => g.table === t)!.writableColumns;
+      console.log(dim(`    ${t.padEnd(28)} ${who} — all ${cols} columns writable`));
+    }
+    if (tables.length > 8) console.log(dim(`    ... and ${tables.length - 8} more`));
+    console.log(dim('  RLS decides which rows. Grants decide which columns. A correct'));
+    console.log(dim('  policy still lets a user rewrite any column of their own row.'));
+    console.log(dim('  Narrow it:  revoke update on t from authenticated;'));
+    console.log(dim('              grant  update (safe_col) on t to authenticated;'));
+    console.log(dim('  Advisory only — does not affect the exit code.'));
+  }
   console.log('');
 }
 
@@ -82,6 +100,7 @@ function render(findings: Finding[]) {
   const pool = new Pool({ connectionString, ssl });
   const client = await pool.connect();
   const findings: Finding[] = [];
+  let grants: GrantAdvisory[] = [];
 
   try {
     // One outer transaction. Nothing we do is ever committed.
@@ -120,6 +139,7 @@ function render(findings: Finding[]) {
       console.log(dim('  Trigger side effects that leave the database are not rolled back.'));
     }
 
+    grants = await checkColumnGrants(client, schema);
     const tables = await listTables(client, schema);
     for (const t of tables) {
       findings.push(await proveTable(client, t));
@@ -131,9 +151,9 @@ function render(findings: Finding[]) {
   }
 
   if (asJson) {
-    console.log(JSON.stringify({ schema, findings }, null, 2));
+    console.log(JSON.stringify({ schema, findings, columnGrantAdvisories: grants }, null, 2));
   } else {
-    render(findings);
+    render(findings, grants);
   }
 
   // Non-zero exit is the entire point: this is a CI gate, not a report.
