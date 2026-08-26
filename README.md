@@ -100,10 +100,20 @@ that has one. Foreign key chains are seeded to their root, so
 
 ## Usage
 
+Not on npm yet — clone and run:
+
 ```bash
-npx rls-sentinel --db "$DATABASE_URL"
-npx rls-sentinel --db "$DATABASE_URL" --schema public --json
+git clone https://github.com/investnovation/rls-sentinel
+cd rls-sentinel
+npm install
+
+npx tsx src/index.ts --db "$DATABASE_URL"
+npx tsx src/index.ts --db "$DATABASE_URL" --schema public --json
 ```
+
+Flags: `--schema` (default `public`), `--json` for machine-readable output,
+`--insecure` to skip TLS certificate verification, `--allow-production` to
+override the guard.
 
 Exit codes: `0` clean, `1` leaks found, `2` error, `3` refused (see Safety). The non-zero exit is the
 entire point — this is a CI gate, not a report you read once.
@@ -233,3 +243,19 @@ Not yet covered: `SECURITY DEFINER` functions that bypass RLS, storage bucket
 policies, `INSERT` probes (forging rows owned by another tenant), composite
 ownership, and multi-hop join ownership (a table two or more foreign keys away
 from anything owned).
+
+## Who made this
+
+Built by [Investnovation](https://investnovation.com) while hardening a
+production Supabase app. The bug that started it — a user id trusted from a
+request body instead of the verified session — is written up
+[here](https://investnovation.com), including the part where a service-role
+client and a client-supplied id each removed the other's protection.
+
+Issues and pull requests welcome. If you found something this tool missed, that
+is the most useful thing you can send.
+
+If you want a pair of eyes on a Supabase project beyond what this covers —
+`SECURITY DEFINER` functions, storage buckets, service-role key handling, auth
+configuration — that is work I take on. Details at
+[investnovation.com](https://investnovation.com).
