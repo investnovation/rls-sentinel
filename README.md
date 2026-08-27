@@ -184,6 +184,45 @@ Exit `3` means refused.
 
 Point it at a branch or staging database.
 
+## What this tool cannot prove
+
+An attack-based tool only tries the situations it sets up. That is its honest
+limit, and pretending otherwise would make it dangerous.
+
+```sql
+create policy p on org_docs for select
+  using (owner_id = auth.uid() or org_id is not null);
+```
+
+Two branches. The probe seeds rows differing only by `owner_id`, so `org_id`
+stays NULL, the second branch never fires, and an earlier version of this tool
+reported **OK** — on a table that in production hands every row to every
+authenticated user. A confident green on a wide-open table is the worst output
+this tool could produce.
+
+It can't execute every branch — that's constraint solving over arbitrary SQL —
+but it can know when it hasn't. Postgres records what each policy depends on in
+`pg_depend`: every column and every table the expression touches, structurally,
+no parsing. Compare that against what the probe varied, and anything left over
+is a branch nobody reached:
+
+```
+UNPROVEN public.org_docs
+         Policies also depend on column(s) org_id and table(s) public.org_members,
+         which the probe never varied. Untested branch.
+```
+
+`UNPROVEN` is not `OK`. It means no leak was found *and* the result doesn't
+cover the whole policy. It doesn't fail the build by default — a gate that fires
+on every org-scoped policy gets switched off within a week — but `--strict`
+makes it fail for teams that want that.
+
+The eventual answer is to parse the policy, enumerate its cases, and generate
+rows that make each one pass and fail, then execute those. Static analysis
+builds the test matrix; execution is the oracle. Neither alone is enough.
+
+Credit: raised by u/pgsql-dev2 on r/Supabase.
+
 ## Column privileges (advisory)
 
 RLS answers *which rows*. Column grants answer *which columns of those rows*.

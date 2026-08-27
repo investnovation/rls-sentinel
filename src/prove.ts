@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { checkPolicyCoverage, describeGaps, type CoverageGap } from './coverage.js';
 
 /**
  * Cross-tenant isolation proof.
@@ -26,7 +27,7 @@ const OWNER_COLUMN_CANDIDATES = [
   'account_id', 'created_by', 'author_id', 'organization_id', 'org_id',
 ];
 
-export type Severity = 'critical' | 'high' | 'ok' | 'skipped';
+export type Severity = 'critical' | 'high' | 'unproven' | 'ok' | 'skipped';
 
 export interface Finding {
   table: string;
@@ -37,6 +38,7 @@ export interface Finding {
   crossTenantRead: boolean;
   crossTenantWrite: boolean;
   crossTenantDelete: boolean;
+  coverageGaps: CoverageGap[];
   severity: Severity;
   detail: string;
 }
@@ -293,6 +295,7 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
     crossTenantRead: false,
     crossTenantWrite: false,
     crossTenantDelete: false,
+    coverageGaps: [],
     severity: 'ok',
     detail: '',
   };
@@ -371,6 +374,16 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
       base.crossTenantDelete = beforeDel.rows[0].n > 0 && afterDel.rows[0].n === 0;
       await c.query('rollback to savepoint del');
     }
+    // What did this probe actually exercise? Everything else in the policy is
+    // a branch we never reached.
+    const varied = new Set<string>([disc.column]);
+    const populated = new Set<string>([`${t.schema}.${t.table}`]);
+    if (plan.kind === 'join') {
+      varied.add(plan.parentOwner);
+      populated.add(`${plan.parentSchema}.${plan.parentTable}`);
+    }
+    base.coverageGaps =
+      await checkPolicyCoverage(c, t.schema, t.table, varied, populated);
   } finally {
     await c.query('rollback to savepoint probe');
     await resetRole(c);
@@ -391,6 +404,9 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
   } else if (t.rlsEnabled && t.policyCount === 0) {
     base.severity = 'high';
     base.detail = 'RLS on with zero policies: locked to everyone, including your app.';
+  } else if (base.coverageGaps.length) {
+    base.severity = 'unproven';
+    base.detail = describeGaps(base.coverageGaps);
   } else {
     base.severity = 'ok';
     base.detail = 'Isolation held under read, write and delete probes.';

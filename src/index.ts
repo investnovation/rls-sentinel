@@ -26,6 +26,7 @@ const COLOR = process.stdout.isTTY && !asJson;
 const isLocal = /localhost|127\.0\.0\.1|host=\/|\.sock/.test(connectionString);
 const insecure = args.includes('--insecure');
 const allowProduction = args.includes('--allow-production');
+const strict = args.includes('--strict');
 const ssl = isLocal ? undefined : { rejectUnauthorized: !insecure };
 
 const c = (code: string, s: string) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -38,6 +39,7 @@ const bold = (s: string) => c('1', s);
 function render(findings: Finding[], grants: GrantAdvisory[]) {
   const leaks = findings.filter((f) => f.severity === 'critical');
   const warns = findings.filter((f) => f.severity === 'high');
+  const unproven = findings.filter((f) => f.severity === 'unproven');
   const skipped = findings.filter((f) => f.severity === 'skipped');
   const ok = findings.filter((f) => f.severity === 'ok');
 
@@ -56,10 +58,11 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
       .filter(Boolean)
       .join(' ');
 
-  for (const f of [...leaks, ...warns, ...ok, ...skipped]) {
+  for (const f of [...leaks, ...warns, ...unproven, ...ok, ...skipped]) {
     const badge =
       f.severity === 'critical' ? red('  LEAK  ')
       : f.severity === 'high'   ? yellow('  WARN  ')
+      : f.severity === 'unproven' ? yellow('UNPROVEN')
       : f.severity === 'skipped' ? dim('  SKIP  ')
       :                            green('   OK   ');
     console.log(`${badge} ${f.table.padEnd(28)} ${marks(f)}`);
@@ -72,6 +75,11 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
     console.log(dim('  These were proven with real seeded rows, not inferred from policy text.'));
   } else {
     console.log(green(bold('  No cross-tenant leaks found.')));
+  }
+  if (unproven.length) {
+    console.log(yellow(`  ${unproven.length} table(s) UNPROVEN — no leak found, but the policy has`));
+    console.log(yellow(`  branches this probe never reached. Not the same as safe.`));
+    if (!strict) console.log(dim('  Use --strict to fail the build on these.'));
   }
   if (skipped.length) {
     console.log(dim(`  ${skipped.length} skipped (no ownership column detected).`));
@@ -157,7 +165,13 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
   }
 
   // Non-zero exit is the entire point: this is a CI gate, not a report.
-  process.exit(findings.some((f) => f.severity === 'critical') ? 1 : 0);
+  // A proven leak always fails. UNPROVEN is honest uncertainty rather than a
+  // finding, so it only fails under --strict -- a gate that fires on every
+  // org-scoped policy would be switched off within a week.
+  const fail = findings.some(
+    (f) => f.severity === 'critical' || (strict && f.severity === 'unproven'),
+  );
+  process.exit(fail ? 1 : 0);
 })().catch((err) => {
   console.error('rls-sentinel: ' + err.message);
   process.exit(2);
