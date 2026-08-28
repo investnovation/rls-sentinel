@@ -133,7 +133,7 @@ jobs:
   isolation:
     runs-on: ubuntu-latest
     steps:
-      - uses: investnovation/rls-sentinel@main
+      - uses: investnovation/rls-sentinel@v0.7.0
         with:
           database-url: ${{ secrets.SUPABASE_BRANCH_DB_URL }}
 ```
