@@ -1,0 +1,53 @@
+name: action
+
+# Proves the composite action itself runs before anyone depends on it.
+# The self-test covers the CLI; this covers the packaging around it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  action:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load fixtures with known leaks
+        run: |
+          psql "$DATABASE_URL" -f fixture.sql
+          psql "$DATABASE_URL" -f real-fixture.sql
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+      # The fixtures contain deliberate leaks, so the action MUST fail here.
+      # If it passes, the gate isn't gating.
+      - name: Run the action
+        id: sentinel
+        continue-on-error: true
+        uses: ./
+        with:
+          database-url: postgresql://postgres:postgres@localhost:5432/postgres
+
+      - name: Assert the gate fired
+        run: |
+          if [ "${{ steps.sentinel.outcome }}" != "failure" ]; then
+            echo "Action exited 0 on a database with known leaks. The gate is broken."
+            exit 1
+          fi
+          echo "Action correctly failed the build on a leaking database."
