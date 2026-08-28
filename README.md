@@ -288,13 +288,14 @@ from anything owned).
 Built by [Investnovation](https://investnovation.com) while hardening a
 production Supabase app. The bug that started it — a user id trusted from a
 request body instead of the verified session — is written up
-[here](https://investnovation.com), including the part where a service-role
-client and a client-supplied id each removed the other's protection.
+[here](https://investnovation.com/blog/hardening-ai-chat-api), including the
+part where a service-role client and a client-supplied id each removed the
+other's protection.
 
 Issues and pull requests welcome. If you found something this tool missed, that
 is the most useful thing you can send.
 
 If you want a pair of eyes on a Supabase project beyond what this covers —
 `SECURITY DEFINER` functions, storage buckets, service-role key handling, auth
-configuration — that is work I take on. Details at
-[investnovation.com](https://investnovation.com).
+configuration — that is work I take on. Details and pricing at
+[investnovation.com/supabase-security-audit](https://investnovation.com/supabase-security-audit).
