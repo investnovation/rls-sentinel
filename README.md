@@ -32,7 +32,12 @@ the other one's data — reads and writes both. Then it rolls everything back.
 Look at `public.invoices` above. Read leak: no. Anon leak: no. RLS enabled,
 two policies, a completely correct `SELECT` policy scoped to `auth.uid()`.
 
-Every scanner that reads policy metadata calls that table safe.
+A linter can grep for a literal `using (true)`, and some do. That catches the
+obvious spelling and misses everything shaped like it: a predicate that
+resolves to true through a join that always matches, a `USING` clause that is
+correct while `WITH CHECK` is absent, a subquery that never actually
+constrains. This tool does not read the policy, so it does not care how the
+permissiveness is spelled.
 
 It isn't. Its `UPDATE` policy is `using (true)`, and any authenticated user can
 silently modify every other tenant's invoices.
@@ -100,16 +105,31 @@ that has one. Foreign key chains are seeded to their root, so
 
 ## Usage
 
-Not on npm yet — clone and run:
+No install required:
+
+```bash
+npx rls-sentinel --db "$DATABASE_URL"
+npx rls-sentinel --db "$DATABASE_URL" --schema public --json
+```
+
+Or install it globally:
+
+```bash
+npm i -g rls-sentinel
+rls-sentinel --db "$DATABASE_URL"
+```
+
+<details>
+<summary>From source</summary>
 
 ```bash
 git clone https://github.com/investnovation/rls-sentinel
 cd rls-sentinel
 npm install
-
 npx tsx src/index.ts --db "$DATABASE_URL"
-npx tsx src/index.ts --db "$DATABASE_URL" --schema public --json
 ```
+
+</details>
 
 Flags: `--schema` (default `public`), `--json` for machine-readable output,
 `--insecure` to skip TLS certificate verification, `--allow-production` to
