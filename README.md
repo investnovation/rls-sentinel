@@ -293,7 +293,7 @@ actual production schema rather than an invented one.
 
 ## Status
 
-v0.4.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
+v0.7.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
 read, cross-tenant blind write, cross-tenant blind delete — across three
 ownership shapes: direct column, primary-key-as-user-id, and single-hop foreign
 key join.
