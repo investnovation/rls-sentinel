@@ -32,12 +32,13 @@ runs:
     - name: Prove isolation
       shell: bash
       working-directory: ${{ github.action_path }}
+      env:
+        DATABASE_URL: ${{ inputs.database-url }}
+        RLS_SCHEMA: ${{ inputs.schema }}
+        RLS_ALLOW_PRODUCTION: ${{ inputs.allow-production }}
       run: |
         FLAGS=""
-        if [ "${{ inputs.allow-production }}" = "true" ]; then
+        if [ "$RLS_ALLOW_PRODUCTION" = "true" ]; then
           FLAGS="--allow-production"
         fi
-        npx tsx src/index.ts \
-          --db "${{ inputs.database-url }}" \
-          --schema "${{ inputs.schema }}" \
-          $FLAGS
+        npx tsx src/index.ts --schema "$RLS_SCHEMA" $FLAGS
