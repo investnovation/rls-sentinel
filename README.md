@@ -31,6 +31,10 @@ the other one's data — reads and writes both. Then it rolls everything back.
 
 Look at `public.invoices` above. Read leak: no. Anon leak: no. RLS enabled,
 two policies, a completely correct `SELECT` policy scoped to `auth.uid()`.
+Every tool that infers safety from policy metadata calls that table protected.
+
+It isn't. Its `UPDATE` policy is `using (true)`, and any authenticated user can
+silently modify every other tenant's invoices.
 
 A linter can grep for a literal `using (true)`, and some do. That catches the
 obvious spelling and misses everything shaped like it: a predicate that
@@ -38,9 +42,6 @@ resolves to true through a join that always matches, a `USING` clause that is
 correct while `WITH CHECK` is absent, a subquery that never actually
 constrains. This tool does not read the policy, so it does not care how the
 permissiveness is spelled.
-
-It isn't. Its `UPDATE` policy is `using (true)`, and any authenticated user can
-silently modify every other tenant's invoices.
 
 ## Why write and delete leaks get missed
 
@@ -315,7 +316,11 @@ other's protection.
 Issues and pull requests welcome. If you found something this tool missed, that
 is the most useful thing you can send.
 
-If you want a pair of eyes on a Supabase project beyond what this covers —
-`SECURITY DEFINER` functions, storage buckets, service-role key handling, auth
-configuration — that is work I take on. Details and pricing at
-[investnovation.com/supabase-security-audit](https://investnovation.com/supabase-security-audit).
+If you want a pair of eyes on a Supabase project beyond what this covers, and
+the list above is exactly that scope, `SECURITY DEFINER` functions, storage
+buckets, service-role key handling and auth configuration, that is work I take
+on. Fixed scope, fixed price, no production access:
+[investnovation.com/audit](https://investnovation.com/audit).
+
+Shipping Supabase apps for clients and need the proof under your own name?
+[investnovation.com/agencies](https://investnovation.com/agencies).
