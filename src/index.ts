@@ -106,6 +106,22 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
     console.log(dim('  no column-level delete.'));
     console.log(dim('  Advisory only — does not affect the exit code.'));
   }
+
+  // Only when something was actually found. On a clean run this is a pitch;
+  // on a run that printed LEAK or UNPROVEN it is the honest next question,
+  // because the reader has just been told what this tool proves and is
+  // entitled to know what it does not.
+  if (leaks.length || unproven.length) {
+    console.log('');
+    console.log(dim('  What this tool cannot reach, and where the rest of the leaks live:'));
+    console.log(dim('    SECURITY DEFINER function bodies      storage bucket policies'));
+    console.log(dim('    service-role key handling             auth configuration'));
+    console.log(dim('    views without security_invoker        owner and BYPASSRLS exemption'));
+    console.log('');
+    console.log(dim(`  Those get checked by hand:    ${bold('investnovation.com/audit')}`));
+    console.log(dim(`  Shipping this for a client?   ${bold('investnovation.com/agencies')}`));
+  }
+
   console.log('');
 }
 
