@@ -88,17 +88,22 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
   if (grants.length) {
     const tables = [...new Set(grants.map((g) => g.table))];
     console.log('');
-    console.log(yellow(`  Advisory — ${tables.length} table(s) grant table-wide UPDATE:`));
+    console.log(yellow(`  Advisory — ${tables.length} table(s) grant table-wide privileges to a client role:`));
     for (const t of tables.slice(0, 8)) {
-      const who = grants.filter((g) => g.table === t).map((g) => g.grantee).join(', ');
-      const cols = grants.find((g) => g.table === t)!.writableColumns;
-      console.log(dim(`    ${t.padEnd(28)} ${who} — all ${cols} columns writable`));
+      for (const g of grants.filter((x) => x.table === t)) {
+        const cmds = g.commands.join(', ');
+        console.log(dim(`    ${t.padEnd(28)} ${g.grantee.padEnd(14)} ${cmds} — all ${g.columns} columns`));
+      }
     }
     if (tables.length > 8) console.log(dim(`    ... and ${tables.length - 8} more`));
     console.log(dim('  RLS decides which rows. Grants decide which columns. A correct'));
-    console.log(dim('  policy still lets a user rewrite any column of their own row.'));
-    console.log(dim('  Narrow it:  revoke update on t from authenticated;'));
-    console.log(dim('              grant  update (safe_col) on t to authenticated;'));
+    console.log(dim('  policy still lets a user read or rewrite any column of their own'));
+    console.log(dim('  row, and set any column at insert time.'));
+    console.log(dim('  Narrow it:  revoke insert, update on t from authenticated;'));
+    console.log(dim('              grant  insert (email) on t to authenticated;'));
+    console.log(dim('              grant  update (bio)   on t to authenticated;'));
+    console.log(dim('  Column privileges cover select, insert and update. Postgres has'));
+    console.log(dim('  no column-level delete.'));
     console.log(dim('  Advisory only — does not affect the exit code.'));
   }
   console.log('');

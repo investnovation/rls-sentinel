@@ -13,10 +13,18 @@ import type { PoolClient } from 'pg';
  * balance, their plan, their role, or their item count. `WITH CHECK` does not
  * help: changing `count` never violates `user_id = auth.uid()`.
  *
+ * The same shape exists on INSERT and SELECT. A signup flow that inserts a
+ * profile client-side can set `role` at row creation instead of updating it
+ * afterwards, and `with check` has no objection because the row genuinely is
+ * theirs. A table-wide SELECT grant means every column of their own row is
+ * readable. Postgres has no column-level DELETE, so it is three commands.
+ * (Credit: u/PeterBuildsSecure on r/Supabase for the INSERT case.)
+ *
  * The fix is column-level grants:
  *
- *   revoke update on public.t from authenticated;
- *   grant  update (display_name, bio) on public.t to authenticated;
+ *   revoke insert, update on public.t from authenticated;
+ *   grant  insert (email, display_name) on public.t to authenticated;
+ *   grant  update (display_name, bio)   on public.t to authenticated;
  *
  * This is deliberately an ADVISORY and never changes the exit code. Supabase's
  * default setup grants table-wide privileges to `authenticated`, so failing CI
@@ -28,7 +36,9 @@ import type { PoolClient } from 'pg';
 export interface GrantAdvisory {
   table: string;
   grantee: string;
-  writableColumns: number;
+  /** Which of select/insert/update are still granted table-wide. */
+  commands: string[];
+  columns: number;
 }
 
 export async function checkColumnGrants(
@@ -37,20 +47,27 @@ export async function checkColumnGrants(
   // has_table_privilege returns false once privileges have been narrowed to
   // specific columns, which makes it a cleaner test than reading
   // information_schema.column_privileges row by row.
+  // has_table_privilege returns false once privileges have been narrowed to
+  // specific columns, which makes it a cleaner test than reading
+  // information_schema.column_privileges row by row. Cast the aggregate to
+  // text[]: node-postgres cannot parse name[] and hands back a raw string.
   const { rows } = await c.query(
     `select c.relname as table_name,
             g.grantee,
+            array_agg(p.cmd order by p.ord)::text[] as commands,
             (select count(*)::int
                from pg_attribute a
               where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
-            ) as writable_columns
+            ) as columns
        from pg_class c
        join pg_namespace n on n.oid = c.relnamespace
        cross join (values ('anon'), ('authenticated')) g(grantee)
+       cross join lateral (values ('select',1),('insert',2),('update',3)) p(cmd, ord)
       where n.nspname = $1
         and c.relkind in ('r','p')
         and exists (select 1 from pg_roles where rolname = g.grantee)
-        and has_table_privilege(g.grantee, c.oid, 'UPDATE')
+        and has_table_privilege(g.grantee, c.oid, p.cmd)
+      group by c.relname, c.oid, g.grantee
       order by c.relname, g.grantee`,
     [schema],
   );
@@ -58,6 +75,7 @@ export async function checkColumnGrants(
   return rows.map((r) => ({
     table: `${schema}.${r.table_name}`,
     grantee: r.grantee,
-    writableColumns: r.writable_columns,
+    commands: r.commands,
+    columns: r.columns,
   }));
 }
