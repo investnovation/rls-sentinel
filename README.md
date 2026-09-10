@@ -276,6 +276,69 @@ belong in separate lists.
 
 Credit: raised by u/guidondor on r/Supabase.
 
+## SECURITY DEFINER exposure
+
+A `SECURITY DEFINER` function runs as its owner, not its caller, so RLS is never
+evaluated inside it. And Postgres grants `EXECUTE` to `PUBLIC` on every function
+at creation. Not Supabase, Postgres. A function written for a trigger or a
+server path, that nobody ever granted anything on, is callable with the anon key
+that ships in your client bundle.
+
+On a fixture where `anon` had no privileges on the table at all:
+
+```
+begin; set local role anon;
+select public.admin_set_credits('<other user>', 500000);
+select public.admin_set_role('<other user>', 'admin');
+commit;
+
+      email      | role  | credits
+-----------------+-------+---------
+ lin@example.com | admin |  500000
+```
+
+A role that could not read one row of that table just made another user an
+admin. Nobody granted anything. That is the default.
+
+```
+UNPROVEN — 2 SECURITY DEFINER function(s) reachable by a client role:
+  public.admin_set_role(target uuid, r text)
+    runs as postgres · PUBLIC (default, never revoked) · search_path NOT pinned
+    body never references auth.uid, auth.jwt or current_setting
+    revoke execute on function public.admin_set_role(target uuid, r text) from public, anon, authenticated;
+```
+
+### What this reports, and what it deliberately does not
+
+Reachability is a fact from the catalog: who can execute it, what it runs as,
+whether `search_path` is pinned, and whether the grant was a decision somebody
+made or the default nobody revoked. `proacl is null` is the discriminator, and
+it stops materialising the moment anything is granted or revoked.
+
+Whether the body enforces authorization correctly is **not** reported and never
+will be. That is static analysis over arbitrary PL/pgSQL and this tool would get
+it wrong quietly. The one body signal used is presence, not correctness: a
+function whose source never mentions `auth.uid`, `auth.jwt` or `current_setting`
+anywhere is unlikely to be enforcing anything. That is a short list to hand a
+person, not a verdict.
+
+The fix is the revoke printed next to each finding, with full identity
+arguments, because `revoke execute on function foo` fails on an overloaded name
+and that is where people give up.
+
+Reported as `UNPROVEN`, never as a leak, and it does not fail the build.
+`--strict` fails only on functions that are exposed by default **and** never
+mention an identity source. A pinned, identity-checking helper that somebody
+granted deliberately is not a finding.
+
+The boundary with [UnitAutogen](https://github.com/unitautogen) is deliberate
+and agreed: reachability here, per-role function and trigger behaviour there,
+and the correctness verdict with a human.
+
+Credit: u/Far_Guess8176 and u/jaimittal91 on r/Supabase, the former off the back
+of a production incident where a payment provider token was readable and
+replaceable through the anon key.
+
 ## Testing itself
 
 A tool that proves other people's isolation should prove its own.
@@ -299,10 +362,12 @@ read, cross-tenant blind write, cross-tenant blind delete — across three
 ownership shapes: direct column, primary-key-as-user-id, and single-hop foreign
 key join.
 
-Not yet covered: `SECURITY DEFINER` functions that bypass RLS, storage bucket
-policies, `INSERT` probes (forging rows owned by another tenant), composite
-ownership, and multi-hop join ownership (a table two or more foreign keys away
-from anything owned).
+`SECURITY DEFINER` reachability is enumerated; function bodies are not read.
+
+Not yet covered: storage bucket policies, `INSERT` probes (forging rows owned by
+another tenant), views without `security_invoker`, owner and `BYPASSRLS`
+exemption, composite ownership, and multi-hop join ownership (a table two or
+more foreign keys away from anything owned).
 
 ## Who made this
 

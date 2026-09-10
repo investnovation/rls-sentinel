@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { listTables, proveTable, type Finding } from './prove.js';
 import { assessSafety } from './safety.js';
 import { checkColumnGrants, type GrantAdvisory } from './grants.js';
+import { checkSecurityDefiners, type DefinerFinding } from './definers.js';
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback?: string) => {
@@ -36,7 +37,7 @@ const green = (s: string) => c('32', s);
 const dim = (s: string) => c('2', s);
 const bold = (s: string) => c('1', s);
 
-function render(findings: Finding[], grants: GrantAdvisory[]) {
+function render(findings: Finding[], grants: GrantAdvisory[], definers: DefinerFinding[]) {
   const leaks = findings.filter((f) => f.severity === 'critical');
   const warns = findings.filter((f) => f.severity === 'high');
   const unproven = findings.filter((f) => f.severity === 'unproven');
@@ -85,6 +86,30 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
     console.log(dim(`  ${skipped.length} skipped (no ownership column detected).`));
   }
 
+  if (definers.length) {
+    console.log('');
+    console.log(yellow(`  UNPROVEN — ${definers.length} SECURITY DEFINER function(s) reachable by a client role:`));
+    for (const d of definers.slice(0, 6)) {
+      console.log(`    ${d.signature}`);
+      const bits = [
+        `runs as ${d.owner}`,
+        d.reachableBy,
+        d.searchPathPinned ? 'search_path pinned' : 'search_path NOT pinned',
+      ];
+      console.log(dim(`      ${bits.join(' · ')}`));
+      if (!d.referencesIdentity) {
+        console.log(dim('      body never references auth.uid, auth.jwt or current_setting'));
+      }
+      console.log(dim(`      ${d.revoke}`));
+    }
+    if (definers.length > 6) console.log(dim(`    ... and ${definers.length - 6} more`));
+    console.log(dim('  These run as their owner, so RLS is never evaluated inside them.'));
+    console.log(dim('  This tool does not read function bodies to decide whether they are'));
+    console.log(dim('  safe. It reports that the surface is reachable, not that calling it'));
+    console.log(dim('  is harmful. That needs a person.'));
+    if (!strict) console.log(dim('  Use --strict to fail on the ones that enforce nothing.'));
+  }
+
   if (grants.length) {
     const tables = [...new Set(grants.map((g) => g.table))];
     console.log('');
@@ -111,7 +136,7 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
   // on a run that printed LEAK or UNPROVEN it is the honest next question,
   // because the reader has just been told what this tool proves and is
   // entitled to know what it does not.
-  if (leaks.length || unproven.length) {
+  if (leaks.length || unproven.length || definers.length) {
     console.log('');
     console.log(dim('  What this tool cannot reach, and where the rest of the leaks live:'));
     console.log(dim('    SECURITY DEFINER function bodies      storage bucket policies'));
@@ -130,6 +155,7 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
   const client = await pool.connect();
   const findings: Finding[] = [];
   let grants: GrantAdvisory[] = [];
+  let definers: DefinerFinding[] = [];
 
   try {
     // One outer transaction. Nothing we do is ever committed.
@@ -169,6 +195,7 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
     }
 
     grants = await checkColumnGrants(client, schema);
+    definers = await checkSecurityDefiners(client, schema);
     const tables = await listTables(client, schema);
     for (const t of tables) {
       findings.push(await proveTable(client, t));
@@ -180,18 +207,23 @@ function render(findings: Finding[], grants: GrantAdvisory[]) {
   }
 
   if (asJson) {
-    console.log(JSON.stringify({ schema, findings, columnGrantAdvisories: grants }, null, 2));
+    console.log(JSON.stringify({ schema, findings, columnGrantAdvisories: grants, securityDefiners: definers }, null, 2));
   } else {
-    render(findings, grants);
+    render(findings, grants, definers);
   }
 
   // Non-zero exit is the entire point: this is a CI gate, not a report.
   // A proven leak always fails. UNPROVEN is honest uncertainty rather than a
   // finding, so it only fails under --strict -- a gate that fires on every
   // org-scoped policy would be switched off within a week.
-  const fail = findings.some(
-    (f) => f.severity === 'critical' || (strict && f.severity === 'unproven'),
-  );
+  // --strict fails only on definers that are exposed by default AND never
+  // mention an identity source. A pinned, identity-checking helper that
+  // somebody granted deliberately is not a finding, and failing on it would
+  // fire on every real project.
+  const unownedDefiners = definers.filter((d) => d.publicByDefault && !d.referencesIdentity);
+  const fail =
+    findings.some((f) => f.severity === 'critical' || (strict && f.severity === 'unproven')) ||
+    (strict && unownedDefiners.length > 0);
   process.exit(fail ? 1 : 0);
 })().catch((err) => {
   console.error('rls-sentinel: ' + err.message);
