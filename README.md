@@ -154,7 +154,7 @@ jobs:
   isolation:
     runs-on: ubuntu-latest
     steps:
-      - uses: investnovation/rls-sentinel@v0.7.0
+      - uses: investnovation/rls-sentinel@v0.8.0
         with:
           database-url: ${{ secrets.SUPABASE_BRANCH_DB_URL }}
 ```
@@ -357,7 +357,7 @@ actual production schema rather than an invented one.
 
 ## Status
 
-v0.7.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
+v0.8.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
 read, cross-tenant blind write, cross-tenant blind delete — across three
 ownership shapes: direct column, primary-key-as-user-id, and single-hop foreign
 key join.
