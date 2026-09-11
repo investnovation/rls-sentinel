@@ -162,6 +162,20 @@ jobs:
 Point it at a preview branch or staging database. The production guard will
 refuse a live one, which is the intended behaviour in CI.
 
+### Use the direct connection, on 5432
+
+The whole run is a single transaction: one `begin`, a savepoint per table, one
+`rollback`. So it holds a backend open for as long as the probe takes. On
+Supabase's transaction pooler (port 6543) that occupies a pooled slot for the
+duration and is subject to the pooler's own transaction limits.
+
+Supabase's own guidance for scripts needing particular session state is to
+connect directly on 5432 and bypass the pooler, and that is what this is.
+`set local role` is transaction-scoped and holds either way, so the pooler is
+not a correctness problem here. There is simply nothing to gain from pooling a
+connection you are going to hold for one long transaction, and a timeout
+halfway through a probe looks like a broken tool.
+
 ## Safety
 
 Every probe runs inside a transaction that is always rolled back, with a
