@@ -321,9 +321,19 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
 
   try {
     // Probe 1: what can an unauthenticated caller see?
+    // anon holding no privilege on the table is the answer we want, not an
+    // error. Without the savepoint the denial aborts the transaction and every
+    // probe after it, so the tool dies on exactly the tables that are correct.
     await becomeUser(c, 'anon', null);
-    const anonRead = await c.query(`select count(*)::int as n from ${qualified}`);
-    base.anonCanRead = anonRead.rows[0].n > 0;
+    await c.query('savepoint anon_read');
+    try {
+      const anonRead = await c.query(`select count(*)::int as n from ${qualified}`);
+      await c.query('release savepoint anon_read');
+      base.anonCanRead = anonRead.rows[0].n > 0;
+    } catch {
+      await c.query('rollback to savepoint anon_read');
+      base.anonCanRead = false;
+    }
     await resetRole(c);
 
     // Probe 2: can tenant A read tenant B's rows?
@@ -345,7 +355,15 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
         [disc.valueB],
       );
       await becomeUser(c, 'authenticated', TENANT_A);
-      try { await c.query(`update ${qualified} set "${scratch}" = null`); } catch { /* denied */ }
+      // A denied statement aborts the whole transaction in Postgres, so the
+      // savepoint is what lets the probe carry on. The catch alone does not.
+      await c.query('savepoint blind_write');
+      try {
+        await c.query(`update ${qualified} set "${scratch}" = null`);
+        await c.query('release savepoint blind_write');
+      } catch {
+        await c.query('rollback to savepoint blind_write');
+      }
       await resetRole(c);
       const after = await c.query(
         `select ctid::text as x from ${qualified} where "${disc.column}" = $1`,
@@ -365,7 +383,13 @@ export async function proveTable(c: PoolClient, t: TableInfo): Promise<Finding> 
         [disc.valueB],
       );
       await becomeUser(c, 'authenticated', TENANT_A);
-      try { await c.query(`delete from ${qualified}`); } catch { /* denied */ }
+      await c.query('savepoint blind_delete');
+      try {
+        await c.query(`delete from ${qualified}`);
+        await c.query('release savepoint blind_delete');
+      } catch {
+        await c.query('rollback to savepoint blind_delete');
+      }
       await resetRole(c);
       const afterDel = await c.query(
         `select count(*)::int as n from ${qualified} where "${disc.column}" = $1`,

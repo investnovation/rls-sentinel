@@ -45,15 +45,21 @@ export async function assessSafety(
   }
 
   // Real user accounts are the clearest signal a Supabase project is live.
+  // A failed statement aborts the whole transaction in Postgres, and catching
+  // the JS exception does nothing about that. Without the savepoint, a database
+  // with no auth schema poisons every query that follows.
+  await c.query('savepoint auth_probe');
   try {
     const { rows } = await c.query(
       `select count(*)::int as n from auth.users`,
     );
+    await c.query('release savepoint auth_probe');
     if (rows[0].n > AUTH_USER_THRESHOLD) {
       reasons.push(`auth.users contains ${rows[0].n} accounts.`);
     }
   } catch {
     // No auth schema (plain Postgres) or no permission. Not a signal either way.
+    await c.query('rollback to savepoint auth_probe');
   }
 
   // Estimated row counts from the planner's statistics -- no table scan.
