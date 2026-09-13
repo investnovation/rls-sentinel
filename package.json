@@ -1,6 +1,6 @@
 {
   "name": "rls-sentinel",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Prove tenant A cannot read or write tenant B's rows. On every deploy.",
   "type": "module",
   "bin": {
