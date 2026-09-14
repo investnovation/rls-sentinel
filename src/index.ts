@@ -70,12 +70,20 @@ function render(findings: Finding[], grants: GrantAdvisory[], definers: DefinerF
     if (f.severity !== 'ok') console.log(dim(`         ${f.detail}`));
   }
 
+  // A skipped table was not proven, so it cannot be reported as clean. The
+  // whole claim of this tool is proof rather than inference; a green line
+  // covering tables it never probed would be the same inference it refuses.
+  const probed = leaks.length + warns.length + unproven.length + ok.length;
+
   console.log('');
   if (leaks.length) {
     console.log(red(bold(`  ${leaks.length} table(s) leaked across tenants.`)));
     console.log(dim('  These were proven with real seeded rows, not inferred from policy text.'));
+  } else if (probed > 0) {
+    console.log(green(bold(`  No cross-tenant leaks found in the ${probed} table(s) probed.`)));
   } else {
-    console.log(green(bold('  No cross-tenant leaks found.')));
+    console.log(yellow(bold('  Nothing was proven. Every table was skipped.')));
+    console.log(dim('  This is not a pass. See the reason on each SKIP above.'));
   }
   if (unproven.length) {
     console.log(yellow(`  ${unproven.length} table(s) UNPROVEN — no leak found, but the policy has`));
@@ -83,7 +91,8 @@ function render(findings: Finding[], grants: GrantAdvisory[], definers: DefinerF
     if (!strict) console.log(dim('  Use --strict to fail the build on these.'));
   }
   if (skipped.length) {
-    console.log(dim(`  ${skipped.length} skipped (no ownership column detected).`));
+    console.log(dim(`  ${skipped.length} table(s) skipped, and therefore not proven either way.`));
+    console.log(dim('  The reason is printed against each one above.'));
   }
 
   if (definers.length) {
