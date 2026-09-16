@@ -139,3 +139,137 @@ alter table public.app_settings enable row level security;
 create policy set_sel on public.app_settings for select to authenticated using (true);
 grant select on public.app_settings to authenticated;
 insert into public.app_settings values ('theme','dark'), ('locale','en-PH');
+
+-- ============================================================================
+--  PART TWO: routines and a trigger.
+--  Added 16 September 2026, same session, before any third-party tool was run.
+--
+--  Part one exercises isolation. This part exercises what a test generator
+--  should find inside function bodies and trigger behaviour. Six objects:
+--  four planted flaws, one control, one cross-tenant definer write.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 7. tier_for_balance()   FLAW: off-by-one on a boundary.
+--    Intended: <1000 basic, 1000-9999 plus, >=10000 premium.
+--    Written with > 1000, so exactly 1000 falls through and returns 'basic'.
+--    One branch, one wrong comparison. A boundary test should catch it.
+-- ---------------------------------------------------------------------------
+create or replace function public.tier_for_balance(bal numeric) returns text
+language plpgsql immutable as $$
+begin
+  if bal >= 10000 then
+    return 'premium';
+  elsif bal > 1000 then          -- should be >= 1000
+    return 'plus';
+  else
+    return 'basic';
+  end if;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 8. apply_discount()   FLAW: unreachable branch.
+--    pct is only ever 0, 25 or 50, so "if pct > 100" can never run.
+--    The docs describe a D chip for suspected dead code. This is the test.
+-- ---------------------------------------------------------------------------
+create or replace function public.apply_discount(amount numeric, code text)
+returns numeric language plpgsql immutable as $$
+declare pct numeric := 0;
+begin
+  if code = 'HALF' then
+    pct := 50;
+  elsif code = 'QUARTER' then
+    pct := 25;
+  else
+    pct := 0;
+  end if;
+
+  if pct > 100 then              -- DEAD: pct is never above 50
+    return 0;
+  end if;
+
+  return amount - (amount * pct / 100);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 9. charge_account()   FLAW: PII in an exception message.
+--    The insufficient-funds path puts the account holder's email address
+--    into the RAISE. This is precisely what --pii claims to audit.
+-- ---------------------------------------------------------------------------
+create or replace function public.charge_account(uid uuid, amt integer)
+returns void language plpgsql as $$
+declare bal integer; em text;
+begin
+  select credits, email into bal, em from public.profiles where id = uid;
+
+  if bal is null then
+    raise exception 'no profile for %', uid;
+  end if;
+
+  if bal < amt then
+    raise exception 'insufficient credits for % (balance %)', em, bal;  -- leaks email
+  end if;
+
+  update public.profiles set credits = credits - amt where id = uid;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 10. audit_profile_changes   FLAW: trigger is attached to DELETE but
+--     returns before writing, so deletions leave no audit trail at all.
+--     The trigger looks correct in the catalog. Only firing it reveals this.
+-- ---------------------------------------------------------------------------
+create table if not exists public.audit_log (
+  id      bigserial primary key,
+  action  text not null,
+  detail  text not null,
+  at      timestamptz not null default now()
+);
+
+create or replace function public.trg_audit_profile() returns trigger
+language plpgsql as $$
+begin
+  if TG_OP = 'DELETE' then
+    return OLD;                  -- BUG: silently writes nothing on delete
+  end if;
+
+  insert into public.audit_log(action, detail)
+    values (TG_OP, 'profile ' || NEW.id::text);
+  return NEW;
+end $$;
+
+drop trigger if exists audit_profile_changes on public.profiles;
+create trigger audit_profile_changes
+  after update or delete on public.profiles
+  for each row execute function public.trg_audit_profile();
+
+-- ---------------------------------------------------------------------------
+-- 11. transfer_credits()   FLAW: cross-tenant write through a definer.
+--     No identity check of any kind. SECURITY DEFINER, so RLS is never
+--     evaluated, and EXECUTE is PUBLIC by default. Any caller moves credits
+--     between any two accounts.
+-- ---------------------------------------------------------------------------
+create or replace function public.transfer_credits(from_id uuid, to_id uuid, amt integer)
+returns void language plpgsql security definer as $$
+begin
+  update public.profiles set credits = credits - amt where id = from_id;
+  update public.profiles set credits = credits + amt where id = to_id;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 12. describe_plan()   CONTROL: correct on every branch.
+--     Total over its input domain, no side effects, no PII, nothing dead.
+--     Anything reported against this is a false positive.
+-- ---------------------------------------------------------------------------
+create or replace function public.describe_plan(p text) returns text
+language plpgsql immutable as $$
+begin
+  if p = 'free' then
+    return 'Free plan';
+  elsif p = 'pro' then
+    return 'Pro plan';
+  elsif p = 'enterprise' then
+    return 'Enterprise plan';
+  else
+    return 'Unknown plan';
+  end if;
+end $$;
