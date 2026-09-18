@@ -1,14 +1,24 @@
 -- ============================================================================
 --  Investnovation RLS evaluation corpus
 --  Jerico Royeth Angeles / investnovation.com
---  Built 16 September 2026. Verified against PostgreSQL 16.13.
 --
---  Six tables. Four carry a deliberate, known flaw. Two are controls.
---  Load this into a scratch database, then point any analysis tool at it
---  and compare what it reports against corpus-answers.md.
+--  Twelve numbered objects. NINE carry a deliberate, known flaw. THREE are
+--  controls: two are correct and must not be flagged, and one cannot be
+--  proven either way and has to be reported as unprovable.
 --
---  Every flaw here was independently verified by execution before this file
---  was written. Nothing in it is derived from any third-party tool.
+--    Part one  (1-6)   tables, a view, and tenant isolation
+--    Part two  (7-12)  routines and a trigger
+--
+--  Load this into a scratch database, point any analysis tool at it, and
+--  compare what it reports against corpus-answers.md.
+--
+--  How a tool behaves on the three controls matters more than what it finds
+--  in the nine flaws. Anyone can find a leak in a schema built to leak.
+--
+--  Built 16 September 2026. Every flaw verified by execution against
+--  PostgreSQL 16.13 before this file was written; object 1 re-verified on
+--  PostgreSQL 18.6 on 17 September 2026. Nothing here is derived from any
+--  third-party tool.
 -- ============================================================================
 
 drop schema if exists public cascade;
