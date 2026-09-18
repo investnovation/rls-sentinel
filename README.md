@@ -154,7 +154,7 @@ jobs:
   isolation:
     runs-on: ubuntu-latest
     steps:
-      - uses: investnovation/rls-sentinel@v0.9.0
+      - uses: investnovation/rls-sentinel@v0.9.2
         with:
           database-url: ${{ secrets.SUPABASE_BRANCH_DB_URL }}
 ```
