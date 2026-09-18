@@ -75,4 +75,8 @@ MIT, same as the rest of this repository. If you run a tool against this and get
 a result worth discussing, or you think one of the twelve is wrong, open an
 issue. Corrections are more useful to me than agreement.
 
+The reasoning behind all of this, and the bug in my own tool that made me build
+it, is written up at
+[investnovation.com/blog/rls-evaluation-corpus](https://investnovation.com/blog/rls-evaluation-corpus).
+
 Jerico Royeth Angeles / [investnovation.com](https://investnovation.com)

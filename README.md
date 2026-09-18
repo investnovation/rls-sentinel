@@ -369,9 +369,45 @@ teaches them to ignore the gate. Those assertions are the ones that matter.
 Runs on every push against Postgres 16. `real-fixture.sql` is modelled on an
 actual production schema rather than an invented one.
 
+## The evaluation corpus
+
+`test/corpus.sql` is a deliberately flawed schema for testing database security
+tools, this one included. Twelve numbered objects: nine carry a known flaw,
+three are controls. Two controls are correct and must not be flagged. The third
+has no tenant column at all, so isolation cannot be proven either way and the
+only honest verdict is to say so.
+
+```bash
+psql -d scratch -f test/corpus.sql
+```
+
+[`test/corpus-answers.md`](./test/corpus-answers.md) has every answer with the
+real output from each flaw, and [`test/README.md`](./test/README.md) explains why
+the three controls are the point. Anyone can find a leak in a schema built to
+leak; what separates a tool worth running is whether it stays quiet on the
+correct object and admits what it could not establish on the unprovable one.
+
+It needs no Supabase. It creates its own `anon` and `authenticated` roles and
+its own `auth.uid()` reading from `request.jwt.claims`, so it loads into any
+Postgres 15 or later.
+
+**The corpus is deliberately wider than this tool.** Several objects in it, the
+view without `security_invoker` and the routine-level flaws in particular, are
+in the "not yet covered" list below. That is on purpose. A fixture built only to
+flatter the thing that ships with it is worth nothing to anyone else.
+
+The full write-up, including the three objects worth looking at hardest, is at
+[investnovation.com/blog/rls-evaluation-corpus](https://investnovation.com/blog/rls-evaluation-corpus).
+
+Running the published CLI against this corpus is how the transaction-abort bug
+was found: four sites where one failed probe poisoned the whole transaction and
+the summary still printed a pass. The fix was savepoints, and the deeper fix was
+teaching the summary to say *nothing was proven* instead of *no leaks found*.
+Point a tool at something it has never seen before you trust it.
+
 ## Status
 
-v0.9.0. Four leak classes — unauthenticated read via the anon key, cross-tenant
+v0.9.2. Four leak classes — unauthenticated read via the anon key, cross-tenant
 read, cross-tenant blind write, cross-tenant blind delete — across three
 ownership shapes: direct column, primary-key-as-user-id, and single-hop foreign
 key join.
